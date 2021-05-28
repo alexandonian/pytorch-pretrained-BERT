@@ -189,3 +189,81 @@ class TextGenerationPipeline(Pipeline):
             return results[0]
 
         return results
+
+    def features(
+        self,
+        text_inputs,
+        return_tensors=False,
+        return_text=True,
+        return_full_text=None,
+        clean_up_tokenization_spaces=False,
+        prefix=None,
+        **generate_kwargs
+    ):
+        """
+        Complete the prompt(s) given as inputs.
+
+        Args:
+            args (:obj:`str` or :obj:`List[str]`):
+                One or several prompts (or one list of prompts) to complete.
+            return_tensors (:obj:`bool`, `optional`, defaults to :obj:`False`):
+                Whether or not to include the tensors of predictions (as token indices) in the outputs.
+            return_text (:obj:`bool`, `optional`, defaults to :obj:`True`):
+                Whether or not to include the decoded texts in the outputs.
+            return_full_text (:obj:`bool`, `optional`, defaults to :obj:`True`):
+                If set to :obj:`False` only added text is returned, otherwise the full text is returned Only meaningful
+                if `return_text` is set to True.
+            clean_up_tokenization_spaces (:obj:`bool`, `optional`, defaults to :obj:`False`):
+                Whether or not to clean up the potential extra spaces in the text output.
+            prefix (:obj:`str`, `optional`):
+                Prefix added to prompt.
+            generate_kwargs:
+                Additional keyword arguments to pass along to the generate method of the model (see the generate method
+                corresponding to your framework `here <./model.html#generative-models>`__).
+
+        Return:
+            A list or a list of list of :obj:`dict`: Each result comes as a dictionary with the following keys:
+
+            - **generated_text** (:obj:`str`, present when ``return_text=True``) -- The generated text.
+            - **generated_token_ids** (:obj:`torch.Tensor` or :obj:`tf.Tensor`, present when ``return_tensors=True``)
+              -- The token ids of the generated text.
+        """
+        prefix = prefix if prefix is not None else self.model.config.prefix
+        return_full_text = return_full_text if return_full_text is not None else self.return_full_text
+
+        if isinstance(text_inputs, str):
+            text_inputs = [text_inputs]
+        results = []
+        for prompt_text in text_inputs:
+            # Manage correct placement of the tensors
+            with self.device_placement():
+                if prefix is None and self.model.__class__.__name__ in [
+                    "XLNetLMHeadModel",
+                    "TransfoXLLMHeadModel",
+                    "TFXLNetLMHeadModel",
+                    "TFTransfoXLLMHeadModel",
+                ]:
+                    # For XLNet and TransformerXL we add an article to the prompt to give more state to the model.
+                    prefix = self.XL_PREFIX
+
+                if prefix:
+                    prefix_inputs = self._parse_and_tokenize(prefix, padding=False, add_special_tokens=False)
+                    # This impacts max_length and min_length argument that need adjusting.
+                    prefix_length = prefix_inputs["input_ids"].shape[-1]
+                    if generate_kwargs.get("max_length", None) is not None:
+                        generate_kwargs["max_length"] += prefix_length
+                    if generate_kwargs.get("min_length", None) is not None:
+                        generate_kwargs["min_length"] += prefix_length
+
+                prefix = prefix or ""
+                inputs = self._parse_and_tokenize(prefix + prompt_text, padding=False, add_special_tokens=False)
+
+                # set input_ids to None to allow empty prompt
+                if inputs["input_ids"].shape[-1] == 0:
+                    inputs["input_ids"] = None
+                    inputs["attention_mask"] = None
+
+                if self.framework == "pt" and inputs["input_ids"] is not None:
+                    inputs = self.ensure_tensor_on_device(**inputs)
+                predictions = self.model(**inputs, output_hidden_states=True)
+                return predictions
